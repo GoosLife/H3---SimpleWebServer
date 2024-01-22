@@ -1,0 +1,17 @@
+body {
+    background-color: hotpink;
+    font-family: 'Comic Sans MS', cursive, sans-serif;
+}
+
+h1 {
+    color: lime;
+    text-align: center;
+}
+
+h2 {
+    color: purple;
+}
+
+p {
+    color: yellow;
+}
