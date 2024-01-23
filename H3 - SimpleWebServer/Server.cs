@@ -11,264 +11,161 @@ namespace H3___SimpleWebServer
 {
     internal class Server
     {
-        private bool running = false;
+        private bool running = false; // Runtime flag for the while loop
 
-        private int timeout = 8;
-        private Encoding charEncoder = Encoding.UTF8;
+        private int timeout = 8; // Timeout for requests in milliseconds
+        private Encoding charEncoder = Encoding.UTF8; // Specifies the character encoding for the request
+
         private Socket? serverSocket;
-        private string contentPath;
 
-        // Supported content types
-        private Dictionary<string, string> extensions = new Dictionary<string, string>()
-        {
-            { "htm", "text/html" },
-            { "html", "text/html" },
-            { "xml", "text/xml" },
-            { "txt", "text/plain" },
-            { "css", "text/css" },
-            { "png", "image/png" },
-            { "gif", "image/gif" },
-            { "jpg", "image/jpg" },
-            { "jpeg", "image/jpeg" },
-            { "zip", "application/zip"}
-        };
+        private string contentPath; // Path to the folder the server will serve from
 
-        public bool Start(IPAddress ipAddress, int port, int maxConnections, string contentPath)
+        // Store the IP address and port number for logging purposes
+        private IPAddress ipAddress;
+        private int port;
+
+        // List of connection threads
+        private List<Thread> connectionThreads = new List<Thread>();
+
+        public Server(IPAddress ipAddress, int port, int maxConnections, string contentPath)
         {
-            if (running) return false;
+            this.ipAddress = ipAddress;
+            this.port = port;
 
             try
             {
-                // Create socket
-                serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-                serverSocket.Bind(new IPEndPoint(ipAddress, port));
-                serverSocket.Listen(maxConnections);
-                serverSocket.ReceiveTimeout = timeout;
-                serverSocket.SendTimeout = timeout;
-                running = true;
-                this.contentPath = contentPath;
+                CreateSocket(ipAddress, port, maxConnections, contentPath);
             }
             catch (Exception e)
             {
-                Console.WriteLine(e.Message);
+                Logger.Log(e.Message);
+            }
+        }
+
+        public bool Start()
+        {
+            if (running) return false;
+
+            running = true;
+
+            try
+            {
+                // Create a new thread that will run the server and listen for requests
+                Thread requestListenerThread = new Thread(() =>
+                {
+                    // TODO: Log this
+                    Logger.Log("Server running on " + ipAddress + ":" + port + "...");
+
+                    Run();
+                });
+
+                // Start the thread and wait for it to finish
+                requestListenerThread.Start();
+                requestListenerThread.Join();
+            }
+            // Unknown error; assume critical and stop running immediately
+            catch (Exception e)
+            {
+                // Log error
+                Logger.Log(e.Message);
+
+                // Ensure server is stopped
+                Stop();
+
+                // Stop running entirely
+                running = false;
+                return false;
             }
 
-            Thread requestListenerThread = new Thread(() =>
-            {
-                while (running)
-                {
-                    Console.WriteLine("Server running on" + ipAddress + ":" + port + "...");
-
-                    Socket clientSocket;
-
-                    try
-                    {
-                        clientSocket = serverSocket.Accept();
-
-                        Thread requestHandlerThread = new Thread(() =>
-                        {
-                            clientSocket.ReceiveTimeout = timeout;
-                            clientSocket.SendTimeout = timeout;
-
-                            try
-                            {
-                                HandleTheRequest(clientSocket);
-                            }
-                            catch (Exception e) { Console.WriteLine("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); }
-                        });
-                        requestHandlerThread.Start();
-                    }
-                    catch (Exception e)
-                    {
-                        Console.WriteLine(e.Message);
-                    }
-                }
-            });
-
+            // If we get here, the server stopped running gracefully, so return true
             return true;
+        }
+
+        // Run loop for the server
+        private void Run()
+        {
+            while (running)
+            {
+                try
+                {
+                    // Process the incoming request
+                    Socket clientSocket = serverSocket.Accept();
+
+                    Thread requestHandlerThread = new Thread(() => ProcessClient(clientSocket));
+
+                    requestHandlerThread.Start();
+                    connectionThreads.Add(requestHandlerThread);
+                }
+                catch (Exception e)
+                {
+                    Logger.Log(e.Message);
+                }
+            }
+
+            // End the server
+            Stop();
         }
 
         public void Stop()
         {
+            // Pick up all remaining connection threads and wait for them to finish
+            if (connectionThreads.Count > 0)
+            {
+                foreach (Thread t in connectionThreads)
+                {
+                    t.Join();
+                }
+
+                connectionThreads.Clear();
+            }
+
+            // Stop the server socket
             if (running)
             {
                 running = false;
                 try { serverSocket!.Close(); }
-                catch (Exception e) { Console.WriteLine(e.Message); }
+                catch (Exception e) { Logger.Log(e.Message); }
                 serverSocket = null;
             }
         }
 
-        private void HandleTheRequest(Socket clientSocket)
+        private void ProcessClient(Socket clientSocket)
         {
-            byte[] buffer = new byte[10240]; // Incoming data buffer
-            int receivedByteCount = clientSocket.Receive(buffer); // Receive the request and keep track of the size
-            string requestString = charEncoder.GetString(buffer, 0, receivedByteCount);
-
-            // Parse the request
-            string httpMethod = requestString.Substring(0, requestString.IndexOf(" "));
-
-            int start = requestString.IndexOf(httpMethod) + httpMethod.Length + 1;
-            int length = requestString.LastIndexOf("HTTP") - start - 1;
-            string requestedUrl = requestString.Substring(start, length);
-
-            string requestedFile;
-            if (httpMethod.Equals("GET") || httpMethod.Equals("HEAD"))
-            {
-                requestedFile = requestedUrl.Split('?')[0];
-            }
-            else
-            {
-                NotImplemented(clientSocket);
-                return;
-            }
-
-            // Convert to local file path and check if it exists. It is not allowed to go outside the content folder.
-            requestedFile = requestedFile.Replace("/", @"\").Replace("\\..", "");
-
-            start = requestedFile.LastIndexOf('.') + 1;
-            if (start > 0)
-            {
-                length = requestedFile.Length - start;
-
-                string extension = requestedFile.Substring(start, length);
-
-                if (extensions.ContainsKey(extension))
-                {
-                    if (File.Exists(contentPath + requestedFile))
-                    {
-                        OK(clientSocket, File.ReadAllBytes(contentPath + requestedFile), extensions[extension]);
-                    }
-                    else
-                    {
-                        NotFound(clientSocket);
-                    }
-                }
-                else
-                {
-                    Forbidden(clientSocket);
-                }
-            }
-            else
-            {
-                // Default to index.html
-                if (requestedFile.Substring(length - 1, 1) != @"\")
-                {
-                    requestedFile += @"\";
-                }
-
-                // Check if index.html exists, then send it
-                if (File.Exists(contentPath + requestedFile + "index.html"))
-                {
-                    OK(clientSocket, File.ReadAllBytes(contentPath + requestedFile + "index.html"), extensions["html"]);
-                }
-                else
-                {
-                    NotFound(clientSocket);
-                }
-            }
+            clientSocket.ReceiveTimeout = timeout;
+            clientSocket.SendTimeout = timeout;
+            HttpResponse response = RequestHandler.HandleTheRequest(clientSocket, contentPath, charEncoder);
+            SendResponse(clientSocket, response);
         }
 
-        private void OK(Socket clientSocket, byte[] content, string contentType)
+        private void CreateSocket(IPAddress ipAddress, int port, int maxConnections, string contentPath)
         {
-            SendResponse(clientSocket, content, "200 OK", contentType);
+            // Create socket
+            serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            serverSocket.Bind(new IPEndPoint(ipAddress, port));
+            serverSocket.Listen(maxConnections);
+            serverSocket.ReceiveTimeout = timeout;
+            serverSocket.SendTimeout = timeout;
+            this.contentPath = contentPath;
         }
 
-        private void NotFound(Socket clientSocket)
-        {
-            string body =
-                """
-                <html>
-                    <head>
-                        <meta 
-                        http-equiv="Content-Type"
-                        content="text/html; 
-                                    charset=utf-8">
-                    </head>
-                    <body>
-                        <h2>Atasoy Simple Web Server</h2>
-                        <div>404 - Not Found</div>
-                    </body>
-                </html>
-                """;
-
-            string responseCode = "404 Not Found";
-
-            string contentType = "text/html";
-
-            SendResponse(clientSocket, body, responseCode, contentType);
-        }
-
-        private void NotImplemented(Socket clientSocket)
-        {
-            string body =
-                """
-                <html>
-                    <head>
-                        <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-                    </head>
-
-                    <body>
-                        <h2>Atasoy Simple Web Server</h2>
-                        <div>501 - Not Implemented</div>
-                    </body>
-                </html>
-                """;
-
-            string responseCode = "501 Not Implemented";
-
-            string contentType = "text/html";
-
-            SendResponse(clientSocket, body, responseCode, contentType);
-        }
-
-        private void Forbidden(Socket clientSocket)
-        {
-            string body =
-                """
-                <html>
-                    <head>
-                        <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-                    </head>
-
-                    <body>
-                        <h2>Atasoy Simple Web Server</h2>
-                        <div>403 - Forbidden</div>
-                    </body>
-                </html>
-                """;
-
-            string responseCode = "403 Forbidden";
-
-            string contentType = "text/html";
-
-            SendResponse(clientSocket, body, responseCode, contentType);
-        }
-
-        private void SendResponse(Socket clientSocket, string content, string responseCode, string contentType)
-        {
-            byte[] contentBytes = charEncoder.GetBytes(content);
-            SendResponse(clientSocket, contentBytes, responseCode, contentType);
-        }
-
-        private void SendResponse(Socket clientSocket, byte[] content, string responseCode, string contentType)
+        private void SendResponse(Socket clientSocket, HttpResponse response)
         {
             try
             {
                 byte[] responseHeader = charEncoder.GetBytes(
-                    "HTTP/1.1 " + responseCode + "\r\n" +
+                    "HTTP/1.1 " + response.Status + "\r\n" +
                     "Server: Atasoy Simple Web Server\r\n" +
-                    "Content-Length: " + content.Length.ToString() + "\r\n" +
+                    "Content-Length: " + response.Content.Length.ToString() + "\r\n" +
                     "Connection: close\r\n" +
-                    "Content-Type: " + contentType + "\r\n\r\n");
+                    "Content-Type: " + response.ContentType + "\r\n\r\n");
 
                 clientSocket.Send(responseHeader);
-                clientSocket.Send(content);
+                clientSocket.Send(response.Content);
                 clientSocket.Close();
             }
             catch (Exception e)
             {
-                Console.WriteLine(e.Message);
+                Logger.Log(e.Message);
             }
         }
     }
